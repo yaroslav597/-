@@ -3,17 +3,62 @@ import {createRoot} from 'react-dom/client';
 import 'leaflet/dist/leaflet.css';
 import './style.css';
 import Map from './components/Map';
-import {length,optimize,validPoint} from './domain/route';
+import PointEditor from './components/PointEditor';
+import MissionSettings from './components/MissionSettings';
+import Simulation from './components/Simulation';
+import {normalizePoint,restoreMission,commandInfo,flightPath,buildMission,missionWarnings} from './domain/mission';
+import {simulationSteps,simulationFrame} from './domain/simulation';
+import {length} from './domain/route';
 import {subscribeDemo} from './services/telemetry';
-const initial = [[55.755,37.59],[55.745,37.63],[55.76,37.625],[55.743,37.60]].map(([lat,lng],index)=>({id:`demo-${index}`,lat,lng,alt:80}));
-function restore() { try { const data=JSON.parse(localStorage.getItem('mission')); return Array.isArray(data)&&data.length<=100&&data.every(validPoint)?data:initial; } catch {return initial;} }
+
+const initial=[[55.755,37.59],[55.745,37.63],[55.76,37.625],[55.743,37.60]].map(([lat,lng],index)=>({id:`demo-${index}`,lat,lng,alt:80}));
+function restore() {
+  try {const data=JSON.parse(localStorage.getItem('mission'));return restoreMission(data??initial);}
+  catch {return restoreMission(initial);}
+}
 function App() {
-  const [points,setPoints]=useState(restore),[closed,setClosed]=useState(false),[selected,setSelected]=useState(null),[telemetry,setTelemetry]=useState(null),[message,setMessage]=useState('Нажмите на карту, чтобы добавить точку'),[speed,setSpeed]=useState(12);
+  const [plan,setPlan]=useState(restore),[selected,setSelected]=useState(null),[telemetry,setTelemetry]=useState(null),[vehicle,setVehicle]=useState(null),[mode,setMode]=useState(null),[message,setMessage]=useState('Нажмите на карту, чтобы добавить точку');
+  const {waypoints:points,settings}=plan;
   useEffect(()=>subscribeDemo(setTelemetry),[]);
-  useEffect(()=>{try {localStorage.setItem('mission',JSON.stringify(points));} catch {setMessage('Не удалось сохранить маршрут в браузере');}},[points]);
-  const total=length(points,closed), active=points.find(point=>point.id===selected);
-  function update(id,changes) {setPoints(previous=>previous.map(point=>point.id===id?{...point,...changes}:point));}
-  function exportMission() {const url=URL.createObjectURL(new Blob([JSON.stringify({version:1,frame:'GLOBAL_RELATIVE_ALT',closed,speed,waypoints:points},null,2)],{type:'application/json'}));const anchor=document.createElement('a');anchor.href=url;anchor.download='mission.json';anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
-  return <><header><div className="brand">✥ <b>АЭРО</b><span>НАЗЕМНАЯ СТАНЦИЯ</span></div><div className="status">● Демонстрационный режим</div><span className="version">GCS / 01</span></header><main><aside><div className="eyebrow">ПЛАНИРОВАНИЕ МИССИИ</div><h1>Полётное задание</h1><p className="muted">Создайте маршрут и выберите порядок обхода.</p><div className="summary"><div><small>РАССТОЯНИЕ</small><strong>{(total/1000).toFixed(2)} <em>км</em></strong></div><div><small>ВРЕМЯ ПОЛЁТА</small><strong>{(total/speed/60).toFixed(1)} <em>мин</em></strong></div></div><div className="options"><label><input type="checkbox" checked={closed} onChange={event=>setClosed(event.target.checked)}/> Вернуться к первой точке</label><label>Скорость, м/с <input type="number" min="1" max="50" value={speed} onChange={event=>setSpeed(Math.min(50,Math.max(1,Number(event.target.value))))}/></label></div><button className="primary" disabled={points.length<3} onClick={()=>{const next=optimize(points,closed);setMessage(`Маршрут сокращён на ${Math.max(0,total-length(next,closed)).toFixed(0)} м. Первая точка сохранена.`);setPoints(next);}}>✧ Оптимизировать маршрут</button><p className="algorithm">Ближайший сосед + 2-opt · до 100 точек</p><div className="list-title"><h2>Путевые точки <span>{points.length}</span></h2><button onClick={()=>{setPoints([]);setSelected(null);}}>Очистить</button></div><div className="point-list">{points.map((point,index)=><button className={`point ${selected===point.id?'selected':''}`} key={point.id} onClick={()=>setSelected(point.id)}><span className="number">{index+1}</span><span><b>{index===0?'Начало маршрута':`Путевая точка ${index+1}`}</b><small>{point.lat.toFixed(5)}, {point.lng.toFixed(5)}</small></span><span>{point.alt} м</span></button>)}{!points.length&&<p className="muted">Добавьте первую точку на карте.</p>}</div>{active&&<form key={active.id} className="editor" onSubmit={event=>{event.preventDefault();const data=new FormData(event.currentTarget);const changes={lat:Number(data.get('lat')),lng:Number(data.get('lng')),alt:Number(data.get('alt'))};if(validPoint(changes)){update(active.id,changes);setMessage('Точка обновлена');}}}><h2>Редактирование точки</h2>{[['lat','Широта',-90,90],['lng','Долгота',-180,180],['alt','Высота, м',5,500]].map(([key,label,min,max])=><label key={key}>{label}<input required name={key} type="number" step="any" min={min} max={max} defaultValue={active[key]}/></label>)}<div className="row"><button type="submit">Сохранить</button><button type="button" onClick={()=>{setPoints(points.filter(point=>point.id!==active.id));setSelected(null);}}>Удалить</button></div></form>}<button disabled={!points.length} onClick={exportMission}>↓ Экспорт задания JSON</button></aside><section className="workspace"><div className="map-title"><div><span className="eyebrow">РАБОЧАЯ ОБЛАСТЬ</span><h2>Карта маршрута</h2></div><span className="badge">WGS 84</span></div><div className="map-wrap"><Map points={points} closed={closed} onSelect={setSelected} onMove={(id,position)=>update(id,{lat:position.lat,lng:position.lng})} onAdd={position=>{if(points.length>=100){setMessage('Достигнут предел: 100 точек');return;}setPoints([...points,{id:crypto.randomUUID(),lat:position.lat,lng:position.lng,alt:80}]);}}/><div className="hint" role="status">{message}</div></div><div className="telemetry-head"><h2>Телеметрия</h2><span>● Синтетические данные · 1 Гц</span></div><div className="telemetry">{[['Высота',telemetry?.altitude.toFixed(1),'м'],['Скорость',telemetry?.speed.toFixed(1),'м/с'],['Батарея',telemetry?.battery.toFixed(0),'%'],['Спутники',telemetry?.satellites,'GPS'],['Курс',telemetry?.heading,'°']].map(([label,value,unit])=><article key={label}><small>{label}</small><strong>{value??'—'} <em>{unit}</em></strong><div className="meter"/></article>)}</div><footer>Демо-телеметрия независима от маршрута. Подключение к автопилоту отсутствует.</footer></section></main></>;
+  useEffect(()=>{try{localStorage.setItem('mission',JSON.stringify(plan));}catch{setMessage('Не удалось сохранить миссию в браузере');}},[plan]);
+  const active=points.find(point=>point.id===selected),mission=buildMission(points,settings),warnings=missionWarnings(points,settings);
+  const total=length(flightPath(points,settings)),estimated=simulationFrame(simulationSteps(points,settings),0).total;
+  function setPoints(updater) {setPlan(previous=>({...previous,waypoints:typeof updater==='function'?updater(previous.waypoints):updater}));}
+  function updatePoint(id,changes) {setPoints(previous=>previous.map(point=>point.id===id?normalizePoint({...point,...changes}):point));}
+  function setSettings(next) {setPlan(previous=>({...previous,settings:next}));}
+  function moveLocation(kind,position) {setPlan(previous=>({...previous,settings:{...previous.settings,[kind]:{...previous.settings[kind],lat:position.lat,lng:position.lng}}}));}
+  function moveRoi(pointId,actionId,position) {setPoints(previous=>previous.map(point=>point.id===pointId?{...point,actions:point.actions.map(action=>action.id===actionId?{...action,target:{...action.target,lat:position.lat,lng:position.lng}}:action)}:point));}
+  function mapClick(position) {
+    if(mode) {
+      if(mode.kind==='roi')moveRoi(mode.pointId,mode.actionId,position);else moveLocation(mode.kind,position);
+      setMode(null);setMessage('Положение сохранено');return;
+    }
+    if(points.length>=100){setMessage('Достигнут предел: 100 точек');return;}
+    const next=normalizePoint({id:crypto.randomUUID(),lat:position.lat,lng:position.lng,alt:80});
+    setPoints(previous=>[...previous,next]);setSelected(next.id);setMessage('Точка добавлена. Настройте действия и сохраните её.');
+  }
+  function exportMission() {
+    const url=URL.createObjectURL(new Blob([JSON.stringify(mission,null,2)],{type:'application/json'}));
+    const anchor=document.createElement('a');anchor.href=url;anchor.download='mission.json';anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  }
+  return <><header><div className="brand">✥ <b>АЭРО</b><span>НАЗЕМНАЯ СТАНЦИЯ</span></div><div className="status">● Демонстрационный режим</div><span className="version">GCS / 01</span></header>
+    <main><aside><div className="eyebrow">ПЛАНИРОВАНИЕ МИССИИ</div><h1>Полётное задание</h1><p className="muted">Постройте маршрут и добавьте действия в нужных точках.</p>
+      <div className="summary"><div><small>РАССТОЯНИЕ</small><strong>{(total/1000).toFixed(2)} <em>км</em></strong></div><div><small>ВРЕМЯ · ОЦЕНКА</small><strong>{(estimated/60).toFixed(1)} <em>мин</em></strong></div></div>
+      <MissionSettings settings={settings} onChange={setSettings} onPick={kind=>setMode({kind})}/>
+      <div className="list-title"><h2>Путевые точки <span>{points.length}</span></h2><button onClick={()=>{setPoints([]);setSelected(null);setMode(null);}}>Очистить</button></div>
+      <div className="point-list">{points.map((point,index)=><button className={`point ${selected===point.id?'selected':''}`} key={point.id} onClick={()=>{setSelected(point.id);setMode(null);}}><span className="number">{index+1}</span><span><b>Точка {index+1}</b><small>{point.lat.toFixed(5)}, {point.lng.toFixed(5)}</small><small>{point.actions.length?point.actions.map(action=>commandInfo(action.command).label).join(' → '):'Без дополнительных действий'}</small></span><span>{point.alt} м</span></button>)}{!points.length&&<p className="muted">Добавьте первую точку на карте.</p>}</div>
+      {active&&<PointEditor key={JSON.stringify(active)} point={active} speed={settings.speed} onSave={next=>{updatePoint(active.id,next);setMessage('Точка и действия сохранены');}} onDelete={()=>{setPoints(previous=>previous.filter(point=>point.id!==active.id));setSelected(null);setMode(null);}} onPickRoi={(pointId,actionId)=>setMode({kind:'roi',pointId,actionId})}/>}
+      <button disabled={!points.length} onClick={exportMission}>↓ Экспорт задания JSON</button>
+    </aside><section className="workspace">
+      <div className="map-title"><div><span className="eyebrow">РАБОЧАЯ ОБЛАСТЬ</span><h2>Карта маршрута</h2></div><span className="badge">WGS 84</span></div>
+      <div className="map-tools"><span>H — Home</span><span>◎ — объект ROI</span><span>L — посадка</span><span>Линия — путь полёта · тонкий пунктир — взгляд на ROI</span></div>
+      {mode&&<div className="pick-banner" role="status">{mode.kind==='home'?'Укажите Home':mode.kind==='landing'?'Укажите место посадки':'Укажите объект ROI'} нажатием на карту.<button onClick={()=>setMode(null)}>Отмена</button></div>}
+      <div className="map-wrap"><Map points={points} settings={settings} vehicle={vehicle} onSelect={setSelected} onMove={(id,position)=>updatePoint(id,{lat:position.lat,lng:position.lng})} onMoveLocation={moveLocation} onMoveRoi={moveRoi} onAdd={mapClick}/><div className="hint" role="status">{mode?'Выберите место на карте. Новая путевая точка не будет добавлена.':message}</div></div>
+      <Simulation key={JSON.stringify(plan)} points={points} settings={settings} onFrame={setVehicle}/>
+      <div className="mission-preview"><h2>Предпросмотр миссии</h2><p className="muted">Порядок: взлёт → точки и действия → завершение. Остановки для выполнения действий добавляются автоматически.</p>{warnings.map(warning=><p className="mission-warning" key={warning}>{warning}</p>)}
+        <details><summary>Команды MAVLink · {mission.items.length}</summary><div className="table-wrap"><table><thead><tr><th>№</th><th>Команда</th><th>Код</th><th>Параметры 1–4</th><th>Координаты / значение 5–7</th></tr></thead><tbody>{mission.items.map(item=><tr key={item.seq}><td>{item.seq+1}</td><td>{commandInfo(item.command).label}</td><td>{item.command}</td><td>{[item.param1,item.param2,item.param3,item.param4].join(' / ')}</td><td>{commandInfo(item.command).location?`${(item.x/1e7).toFixed(5)}, ${(item.y/1e7).toFixed(5)}, ${item.z} м`:[item.x,item.y,item.z].join(' / ')}</td></tr>)}</tbody></table></div></details>
+      </div>
+      <div className="telemetry-head"><h2>Демо-телеметрия</h2><span>● Синтетические данные · 1 Гц</span></div><div className="telemetry">{[['Высота',telemetry?.altitude.toFixed(1),'м'],['Скорость',telemetry?.speed.toFixed(1),'м/с'],['Батарея',telemetry?.battery.toFixed(0),'%'],['Спутники',telemetry?.satellites,'GPS'],['Курс',telemetry?.heading,'°']].map(([label,value,unit])=><article key={label}><small>{label}</small><strong>{value??'—'} <em>{unit}</em></strong><div className="meter"/></article>)}</div><footer>Демо-телеметрия независима от предпросмотра. Подключение к автопилоту отсутствует.</footer>
+    </section></main></>;
 }
 createRoot(document.getElementById('root')).render(<App/>);

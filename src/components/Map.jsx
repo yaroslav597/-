@@ -1,22 +1,38 @@
-import React, {useEffect, useRef} from 'react';
+import React, {useEffect,useRef} from 'react';
 import L from 'leaflet';
-export default function Map({points,closed,onAdd,onMove,onSelect}) {
-  const host = useRef(), map = useRef(), layer = useRef(), actions = useRef();
-  actions.current = {onAdd,onMove,onSelect};
-  useEffect(() => {
-    map.current = L.map(host.current).setView([55.75,37.61],13);
+import {flightPath} from '../domain/mission.js';
+export default function Map({points,settings,vehicle,onAdd,onMove,onSelect,onMoveLocation,onMoveRoi}) {
+  const host=useRef(),map=useRef(),layer=useRef(),vehicleLayer=useRef(),actions=useRef();
+  actions.current={onAdd,onMove,onSelect,onMoveLocation,onMoveRoi};
+  useEffect(()=>{
+    map.current=L.map(host.current).setView([settings.home.lat,settings.home.lng],13);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap contributors',maxZoom:19}).addTo(map.current);
-    layer.current = L.layerGroup().addTo(map.current);
-    map.current.on('click',event => actions.current.onAdd(event.latlng));
-    const resize = new ResizeObserver(() => map.current.invalidateSize()); resize.observe(host.current);
-    return () => { resize.disconnect(); map.current.remove(); };
+    layer.current=L.layerGroup().addTo(map.current);vehicleLayer.current=L.layerGroup().addTo(map.current);
+    map.current.on('click',event=>actions.current.onAdd(event.latlng));
+    const resize=new ResizeObserver(()=>map.current.invalidateSize());resize.observe(host.current);
+    return ()=>{resize.disconnect();map.current.remove();};
   },[]);
-  useEffect(() => {
+  useEffect(()=>{
     layer.current.clearLayers();
-    const positions = points.map(point => [point.lat,point.lng]);
-    if (closed && positions.length>1) positions.push(positions[0]);
-    L.polyline(positions,{color:'#087f8c',weight:4,dashArray:'8 6'}).addTo(layer.current);
-    points.forEach((point,index) => L.marker([point.lat,point.lng],{draggable:true,icon:L.divIcon({className:'waypoint',html:`<span>${index+1}</span>`,iconSize:[30,30],iconAnchor:[15,15]})}).addTo(layer.current).on('click',() => actions.current.onSelect(point.id)).on('dragend',event => actions.current.onMove(point.id,event.target.getLatLng())));
-  },[points,closed]);
-  return <div className="map" ref={host} aria-label="Карта: нажмите для добавления точки"/>;
+    L.polyline(flightPath(points,settings).map(point=>[point.lat,point.lng]),{color:'#087f8c',weight:4,dashArray:'8 6',className:'flight-path'}).addTo(layer.current);
+    function marker(location,text,className,title,onDrag,onClick) {
+      const item=L.marker([location.lat,location.lng],{title,draggable:true,icon:L.divIcon({className:`waypoint ${className}`,html:`<span>${text}</span>`,iconSize:[30,30],iconAnchor:[15,15]})}).addTo(layer.current).bindTooltip(title);
+      if(onClick)item.on('click',onClick);
+      item.on('dragend',event=>onDrag(event.target.getLatLng()));
+    }
+    points.forEach((point,index)=>{
+      marker(point,index+1,'',`Точка ${index+1} · действий: ${point.actions.length}`,position=>actions.current.onMove(point.id,position),()=>actions.current.onSelect(point.id));
+      point.actions.filter(action=>action.command===201).forEach(action=>{
+        marker(action.target,'◎','roi-marker',`ROI точки ${index+1}`,position=>actions.current.onMoveRoi(point.id,action.id,position),()=>actions.current.onSelect(point.id));
+        L.polyline([[point.lat,point.lng],[action.target.lat,action.target.lng]],{color:'#e9be76',weight:1,dashArray:'3 8',className:'roi-link'}).addTo(layer.current);
+      });
+    });
+    marker(settings.home,'H','home-marker','Home · место старта',position=>actions.current.onMoveLocation('home',position));
+    if(settings.ending==='land')marker(settings.landing,'L','land-marker','Место посадки',position=>actions.current.onMoveLocation('landing',position));
+  },[points,settings]);
+  useEffect(()=>{
+    vehicleLayer.current.clearLayers();
+    if(vehicle)L.marker([vehicle.lat,vehicle.lng],{interactive:false,icon:L.divIcon({className:'waypoint vehicle-marker',html:'<span>✥</span>',iconSize:[30,30],iconAnchor:[15,15]})}).addTo(vehicleLayer.current);
+  },[vehicle]);
+  return <div className="map" ref={host} aria-label="Карта маршрута, Home и объектов наблюдения"/>;
 }
