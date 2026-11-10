@@ -1,11 +1,27 @@
-# План интеграции
+# Контракт backend-моста
 
-Frontend → FastAPI (HTTP/WebSocket) → отдельный worker pymavlink → ArduPilot SITL.
+React ↔ FastAPI (HTTP/WebSocket) ↔ один worker pymavlink ↔ ArduPilot SITL / автопилот.
 
-Предлагаемый `POST /api/missions` принимает экспортируемый JSON: version=3, frame=GLOBAL_RELATIVE_ALT, settings={speed,takeoff,takeoffAlt,ending,home,landing}, waypoints=[{id,lat,lng,alt,delay,actions:[{id,command,params,target?}]}], items=[{seq,command,frame,param1,param2,param3,param4,x,y,z,current,autocontinue}]. Координаты WGS84; alt — метры относительно home. Backend валидирует ограничения, создаёт missionId. Сохранение задания и загрузка на автопилот — отдельные операции. Возвращать статус загрузки только после MAVLink MISSION_ACK; обрабатывать timeout и отрицательный ACK.
+## Реализовано
 
-`WS /api/telemetry` передаёт `{type:"telemetry",payload:{timestamp,altitude,speed,battery,satellites,heading,mode}}`. timestamp — Unix миллисекунды, altitude — относительные метры, speed — м/с, battery — %, heading — градусы. Добавить проверку схемы, stale timeout, переподключение с backoff и индикатор потери связи перед активацией реального режима. Заменить subscribeDemo в App на subscribeWebSocket.
+- Планировщик React: точки с действиями, Home, ROI, взлёт/завершение, локальное сохранение, экспорт и демонстрационный предпросмотр.
+- FastAPI: проверка плана v3, серверная компиляция, SQLite, чтение сохранённых миссий, отдельная загрузка, операции с проверяемыми статусами.
+- pymavlink: единственный владелец соединения, HEARTBEAT, запрос телеметрии/Home, MISSION_COUNT/REQUEST_INT/ITEM_INT/ACK, таймауты и повторы, служебный Home в seq=0.
+- WebSocket: status, telemetry, operation, mission_current; источник и неизвестные/устаревшие данные учитываются.
+- React: сохранение/загрузка, статусы, переключение демо/backend, WebSocket с переподключением и сбросом устаревшей телеметрии.
 
-Worker владеет единственным MAVLink-соединением, принимает задания через очередь и транслирует HEARTBEAT, GLOBAL_POSITION_INT, SYS_STATUS, GPS_RAW_INT. При преобразовании учитывать масштаб целых координат и единиц MAVLink. Для SITL endpoint задаётся конфигурацией (например udpin:127.0.0.1:14550); порт сверять с запуском конкретного симулятора. Завершение задаётся settings.ending: rtl, land или hold; RTL/LAND уже включены клиентом в items. Home в settings — плановый, backend должен сверить его с home автопилота, а не молча считать их одинаковыми. Назначение команд и их параметров реализовано на клиенте. Передача миссии, ARM и START — отдельный будущий функционал. Backend должен повторно валидировать команды и параметры, подготовить home-элемент с учётом автопилота, назначить target_system/target_component и выполнить полный протокол загрузки миссии. Клиентские items — заготовки, а не отправленные пакеты.
+Полная схема API и инструкции запуска: [backend/README.md](../backend/README.md).
 
-Backend и SITL в этой версии не реализованы. Предлагаемая структура: backend/app/api, schemas, services/mission, services/telemetry, adapters/mavlink. Перед интеграцией добавить серверную валидацию, обработку ACK и тесты на SITL.
+## Формат миссии
+
+POST /api/missions принимает version=3, settings={speed,takeoff,takeoffAlt,ending,home,landing}, waypoints=[{id,lat,lng,alt,delay,actions:[{id,command,params,target?}]}]. Необязательные items клиента игнорируются: сервер создаёт их заново. Ответ содержит missionId, createdAt, plan и скомпилированные items.
+
+POST /api/uploads принимает {missionId}. Ответ HTTP 202 содержит operationId. Он подтверждает принятие запроса, а не загрузку в автопилот. GET /api/operations/{id} возвращает queued/running/succeeded/failed; те же события публикуются через WS /ws/telemetry. succeeded допустим только после полного обмена и MISSION_ACK=ACCEPTED.
+
+Координаты — WGS84; высота маршрута — метры относительно Home. Home борта берётся из HOME_POSITION, его абсолютная высота нужна для служебного элемента 0. Плановый Home сверяется с реальным, но не устанавливается на борту автоматически. Команды и параметры — числа, русские названия только в UI.
+
+## Проверка на SITL и следующий этап
+
+Первый прогон выполнен на Windows-сборке ArduPilot SITL 4.7.3 через TCP 5760. Две миссии (RTL и LAND, по 18 элементов) загружены, прочитаны обратно и совпали по проверяемым полям. Подробности — [протокол SITL](sitl-validation.md). Текущий общий запуск использует Ubuntu WSL и ArduCopter 4.8.0-dev. Добавлены подтверждаемые ARM/START, RTL и LAND, прогресс команд, фактический след на карте. Короткий полёт на отдельном SITL: взлёт → две точки → RTL → посадка → автоматическое выключение ARM. Параметры и ограничения — [backend/README.md](../backend/README.md#управление-полётом). Проверка задержек, поворотов и камеры при выполнении маршрута остаётся отдельным этапом.
+
+POST /api/mission-checks принимает {missionId} и ставит чтение/сравнение в общую очередь. Результат операции содержит matches, differences и items. Успешное чтение не означает совпадение: проверяйте result.matches. Номер 0 относится к Home автопилота; полётные команды сравниваются с номера 1 с учётом используемых Copter полей, float32 и эквивалентных систем координат.
